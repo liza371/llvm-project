@@ -62,23 +62,10 @@ private:
   void finalizeFlags(InputSection *input);
 };
 
-// We maintain one ThunkInfo per real function.
-//
-// The "active thunk" is represented by the sym/isec pair that
-// turns-over during finalize(): as the call-site address advances,
-// the active thunk goes out of branch-range, and we create a new
-// thunk to take its place.
-//
-// The remaining members -- bools and counters -- apply to the
-// collection of thunks associated with the real function.
-
+// One ThunkInfo per branch target (see ThunkKey): how many thunks it has
+// so far, which numbers the thunks' names.
 struct ThunkInfo {
-  // These denote the active thunk:
-  Defined *sym = nullptr;             // private-extern symbol for active thunk
-  ConcatInputSection *isec = nullptr; // input section for active thunk
-
-  // The following value is cumulative across all thunks on this function
-  uint8_t sequence = 0; // how many thunks created so-far?
+  unsigned sequence = 0;
 };
 
 // ConcatOutputSections that contain code (text) require special handling to
@@ -98,31 +85,35 @@ public:
   }
 
 private:
+  struct Branch;
+  struct Island;
+
   std::vector<ConcatInputSection *> thunks;
   /// \return true if the target in \p r is in range from the location in \p
   /// isec. If the target isec is not finalized, \return false.
   bool isTargetKnownInRange(const ConcatInputSection &isec,
                             const Relocation &r) const;
-  /// If there exists a thunk in range of the target in \p r, \return that
-  /// thunk.
-  Defined *getThunkInRange(const ConcatInputSection &isec, const Relocation &r,
-                           const ThunkInfo &thunkInfo) const;
-  Defined *findThunkInRange(const ConcatInputSection &isec,
-                            const Relocation &r) const;
-  /// Update \p r to target \p thunk which is guaranteed to be in range.
-  void updateBranchTargetToThunk(Relocation &r, Defined *thunk);
-  /// Create a new thunk and update \p r to target the new thunk.
-  void createThunk(const ConcatInputSection &isec, Relocation &r);
-  /// \return the largest possible stub section end VA or \p std::nullopt if we
-  /// can't estimate this yet. Used to determine if stub symbol targets are in
-  /// range.
-  std::optional<uint64_t> estimateStubsEndVA(unsigned numPotentialThunks) const;
-  /// \return true if the target in \p r is in __stubs or __objc_stubs and in
-  /// range from the location in \p isec. \p estimatedStubsEnd is the estimated
-  /// VA of the end of the last stubs section.
-  bool isTargetStubsAndInRange(const ConcatInputSection &isec,
-                               const Relocation &r,
-                               std::optional<uint64_t> estimatedStubsEnd) const;
+  /// \return true if the branch in \p r (at tentative offset \p callOff in
+  /// \p isec) might not reach its target if thunks shift sections by up to
+  /// \p margin bytes.
+  bool isFarBranch(const ConcatInputSection *isec, const Relocation &r,
+                   uint64_t callOff, ArrayRef<uint64_t> tentativeOffsets,
+                   uint64_t margin, std::optional<uint64_t> stubsEnd) const;
+  /// Find all branches that need a thunk and partition them into 64 MB islands.
+  void findFarBranches(ArrayRef<uint64_t> tentativeOffsets,
+                       uint64_t tentativeEnd, std::vector<Branch> &far,
+                       std::vector<Island> &islands) const;
+  /// Create the thunks for each island and redirect the far branches to them.
+  void makeThunks(MutableArrayRef<Branch> far, MutableArrayRef<Island> islands);
+  /// Verify that every redirected branch in \p far can reach its thunk.
+  void checkThunkRanges(ArrayRef<Branch> far) const;
+  /// Create a thunk for the branch in \p r, which is in \p isec, and
+  /// \return its symbol. The thunk's position is assigned later.
+  Defined *createThunk(const ConcatInputSection &isec, const Relocation &r);
+  /// \return the largest possible stub section end VA if this section ends
+  /// at \p endVA, or \p std::nullopt if we can't estimate this yet. Used to
+  /// determine if stub symbol targets are in range.
+  std::optional<uint64_t> estimateStubsEndVA(uint64_t endVA) const;
   /// The number of relocations updated to point to thunks.
   size_t thunkCallCount = 0;
 };
